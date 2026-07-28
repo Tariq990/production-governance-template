@@ -1,31 +1,31 @@
 #!/usr/bin/env python3
-"""Deterministic repository quality gate.
-
-The gate combines built-in Git safety checks, configurable static audits, and
-project commands from governance.toml. It always writes machine-readable and
-human-readable reports and never treats prose as evidence of success.
-"""
+"""Deterministic repository quality gate with contract and test integrity."""
 from __future__ import annotations
 
 import argparse
 import fnmatch
+import hashlib
 import json
 import os
 import re
 import shlex
 import subprocess
+import sys
+import tempfile
 import time
+import uuid
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 try:
     import tomllib
-except ModuleNotFoundError as exc:  # pragma: no cover - Python <3.11 guard
-    raise SystemExit("Python 3.11+ is required") from exc
+except ModuleNotFoundError:
+    raise SystemExit("Python 3.11+ is required") from None
 
 ROOT = Path(__file__).resolve().parent.parent
 LEVELS = {"fast": 1, "slice": 2, "gate": 3}
+DEFAULT_CONTRACT = ROOT / ".gate" / "task-contract.json"
 
 
 @dataclass
@@ -38,14 +38,22 @@ class CheckResult:
     exit_code: int | None = None
 
 
+@dataclass
+class CollectionEvidence:
+    base_nodes: set[str]
+    head_nodes: set[str]
+    missing_nodes: list[str]
+    waived_missing_nodes: list[str]
+
+
 class GateFailure(RuntimeError):
     pass
 
 
-def run_process(argv: list[str], *, cwd: Path = ROOT) -> tuple[int, str]:
+def run_process(argv: list[str], *, cwd: Path | None = None) -> tuple[int, str]:
     completed = subprocess.run(
         argv,
-        cwd=cwd,
+        cwd=cwd or ROOT,
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
@@ -65,36 +73,67 @@ def load_config() -> dict[str, Any]:
 def git(*args: str) -> str:
     code, output = run_process(["git", *args])
     if code != 0:
-        raise GateFailure(f"git {' '.join(args)} failed: {output.strip()}")
+        raise GateFailure(output.strip() or f"git {' '.join(args)} failed")
     return output.strip()
 
 
-def current_branch() -> str:
-    return git("rev-parse", "--abbrev-ref", "HEAD")
+def source_branch() -> str:
+    return os.getenv("GATE_SOURCE_BRANCH") or git("rev-parse", "--abbrev-ref", "HEAD")
 
 
-def current_sha() -> str:
-    return git("rev-parse", "HEAD")
+def source_sha() -> str:
+    return os.getenv("GATE_SOURCE_SHA") or git("rev-parse", "HEAD")
 
 
-def resolve_base_ref(config: dict[str, Any]) -> str:
-    return os.getenv("GATE_BASE_REF") or str(config["gate"].get("base_ref", "HEAD~1"))
+def validate_base_ref(
+    config: dict[str, Any], contract: dict[str, Any] | None
+) -> tuple[str, bool, str]:
+    if contract and contract.get("base_ref"):
+        base_ref = str(contract["base_ref"])
+        code, output = run_process(["git", "rev-parse", "--verify", f"{base_ref}^{{commit}}"])
+        if code != 0:
+            raise GateFailure(f"contract base_ref {base_ref!r} is not resolvable: {output.strip()}")
+        code, output = run_process(["git", "merge-base", base_ref, "HEAD"])
+        if code != 0 or not output.strip():
+            raise GateFailure(f"no merge base for {base_ref!r} and HEAD: {output.strip()}")
+        return base_ref, False, "contract base_ref validated (fail-closed)"
+
+    candidates = [
+        ("GATE_BASE_REF", os.getenv("GATE_BASE_REF", "")),
+        ("governance.toml", str(config.get("gate", {}).get("base_ref", ""))),
+        ("fallback", "HEAD~1"),
+    ]
+    usable = [(name, ref) for name, ref in candidates if ref]
+    for index, (name, ref) in enumerate(usable):
+        code, _ = run_process(["git", "rev-parse", "--verify", f"{ref}^{{commit}}"])
+        if code == 0:
+            return ref, index > 0, f"resolved from {name}"
+    raise GateFailure("no usable base ref")
+
+
+def git_lines(*args: str) -> list[str]:
+    code, output = run_process(["git", *args])
+    if code != 0:
+        raise GateFailure(output.strip() or f"git {' '.join(args)} failed")
+    return [line.strip().replace("\\", "/") for line in output.splitlines() if line.strip()]
 
 
 def changed_files(base_ref: str) -> list[str]:
-    code, output = run_process(["git", "diff", "--name-only", f"{base_ref}...HEAD"])
+    return sorted(set(git_lines("diff", "--name-only", f"{base_ref}...HEAD")))
+
+
+def deleted_files(base_ref: str) -> list[str]:
+    return sorted(set(git_lines("diff", "--name-only", "--diff-filter=D", f"{base_ref}...HEAD")))
+
+
+def committed_diff(base_ref: str) -> str:
+    code, output = run_process(["git", "diff", f"{base_ref}...HEAD"])
     if code != 0:
-        # A new repository may not have a usable merge base yet.
-        code, output = run_process(["git", "diff", "--name-only", "HEAD~1", "HEAD"])
-    if code != 0:
-        code, output = run_process(["git", "ls-files"])
-    if code != 0:
-        raise GateFailure(output.strip())
-    return sorted({line.strip().replace("\\", "/") for line in output.splitlines() if line.strip()})
+        raise GateFailure(output.strip() or "unable to read committed diff")
+    return output
 
 
 def path_matches_rule(path: str, rule: str) -> bool:
-    """Match an exact path, a directory prefix, or an explicit glob rule."""
     if any(token in rule for token in ("*", "?", "[")):
         return fnmatch.fnmatch(path, rule)
     if rule.endswith("/"):
@@ -102,87 +141,117 @@ def path_matches_rule(path: str, rule: str) -> bool:
     return path == rule
 
 
-def check_branch_and_sha(config: dict[str, Any]) -> str:
-    branch = current_branch()
-    sha = current_sha()
-    expected_branch = os.getenv("EXPECTED_BRANCH")
-    expected_sha = os.getenv("EXPECTED_HEAD_SHA")
-    if expected_branch and branch != expected_branch:
-        raise GateFailure(f"branch mismatch: expected {expected_branch}, got {branch}")
-    if expected_sha and sha != expected_sha:
-        raise GateFailure(f"SHA mismatch: expected {expected_sha}, got {sha}")
-    patterns = config["gate"].get("allowed_branch_patterns", [])
+def check_identity(config: dict[str, Any], contract: dict[str, Any] | None) -> str:
+    branch, sha = source_branch(), source_sha()
+    if contract:
+        expected_branch = contract.get("expected_branch")
+        expected_sha = contract.get("expected_head_sha")
+        if expected_branch and branch != expected_branch:
+            raise GateFailure(f"contract branch mismatch: expected {expected_branch}, got {branch}")
+        if expected_sha and sha != expected_sha:
+            raise GateFailure(f"contract SHA mismatch: expected {expected_sha}, got {sha}")
+    env_branch = os.getenv("EXPECTED_BRANCH")
+    env_sha = os.getenv("EXPECTED_HEAD_SHA")
+    if env_branch and branch != env_branch:
+        raise GateFailure(f"branch mismatch: expected {env_branch}, got {branch}")
+    if env_sha and sha != env_sha:
+        raise GateFailure(f"SHA mismatch: expected {env_sha}, got {sha}")
+    patterns = config.get("gate", {}).get("allowed_branch_patterns", [])
     if patterns and not any(fnmatch.fnmatch(branch, pattern) for pattern in patterns):
         raise GateFailure(f"branch {branch!r} does not match allowed patterns")
     return f"branch={branch} sha={sha}"
 
 
-def check_changed_file_policy(config: dict[str, Any], files: list[str]) -> str:
-    gate = config["gate"]
+def check_file_policy(
+    config: dict[str, Any], files: list[str], contract: dict[str, Any] | None
+) -> str:
+    gate = config.get("gate", {})
     forbidden = [str(item) for item in gate.get("forbidden_paths", [])]
     extensions = [str(item) for item in gate.get("forbidden_extensions", [])]
-    violations = [path for path in files if any(path_matches_rule(path, item) for item in forbidden)]
+    violations = [path for path in files if any(path_matches_rule(path, rule) for rule in forbidden)]
     violations += [path for path in files if any(path.endswith(ext) for ext in extensions)]
-
-    allowed_raw = os.getenv("GATE_ALLOWED_FILES", "").strip()
-    if allowed_raw:
-        allowed = {item.strip().replace("\\", "/") for item in allowed_raw.split(",") if item.strip()}
-        violations += [path for path in files if path not in allowed]
-
+    if contract:
+        allowed = set(str(item) for item in contract.get("allowed_files", []))
+        if allowed:
+            violations += [path for path in files if path not in allowed]
+        protected = [str(item) for item in contract.get("protected_paths", [])]
+        violations += [
+            path for path in files if any(path_matches_rule(path, rule) for rule in protected)
+        ]
     if violations:
-        raise GateFailure("forbidden or out-of-scope files changed: " + ", ".join(sorted(set(violations))))
+        raise GateFailure("forbidden or out-of-scope files: " + ", ".join(sorted(set(violations))))
     return f"{len(files)} changed file(s) accepted"
 
 
-def check_diff() -> str:
-    code, output = run_process(["git", "diff", "--check"])
-    if code != 0:
-        raise GateFailure(output.strip())
-    return "git diff --check passed"
+def check_diff(base_ref: str) -> str:
+    commands = [
+        ["git", "diff", "--check", f"{base_ref}...HEAD"],
+        ["git", "diff", "--check"],
+        ["git", "diff", "--cached", "--check"],
+    ]
+    for command in commands:
+        code, output = run_process(command)
+        if code != 0:
+            raise GateFailure(output.strip() or f"{' '.join(command)} failed")
+    return "committed, unstaged, and staged diff checks passed"
 
 
-def check_worktree(config: dict[str, Any], level: str) -> str:
-    if level != "gate" or not config["gate"].get("require_clean_tree_on_gate", False):
-        return "clean-tree enforcement applies only to the full gate"
-    ignore = [str(item) for item in config["gate"].get("ignore_dirty_paths", [])]
+def filtered_status(config: dict[str, Any]) -> str:
+    ignored = [str(item).rstrip("/") for item in config.get("gate", {}).get("ignore_dirty_paths", [])]
     status = git("status", "--porcelain")
-    dirty = []
+    kept: list[str] = []
     for line in status.splitlines():
         path = line[3:].strip().replace("\\", "/")
-        if not any(path.startswith(prefix) for prefix in ignore):
-            dirty.append(line)
-    if dirty:
-        raise GateFailure("working tree is dirty: " + " | ".join(dirty))
+        if not any(path == item or path.startswith(item + "/") for item in ignored):
+            kept.append(line)
+    return "\n".join(kept)
+
+
+def check_initial_tree(config: dict[str, Any], level: str) -> str:
+    if level != "gate" or not config.get("gate", {}).get("require_clean_tree_on_gate", False):
+        return "clean-tree enforcement skipped"
+    status = filtered_status(config)
+    if status:
+        raise GateFailure("working tree dirty: " + status.replace("\n", " | "))
     return "working tree clean"
+
+
+def check_final_tree(initial: str, config: dict[str, Any]) -> tuple[str, str, str]:
+    final = filtered_status(config)
+    if final or final != initial:
+        detail = "working tree modified by gate commands"
+        if final:
+            detail += ": " + final.replace("\n", " | ")
+        return "FAIL", detail, final
+    return "PASS", "working tree unchanged after commands", final
 
 
 def check_conflict_markers(files: list[str]) -> str:
     markers = re.compile(r"^(<<<<<<<|=======|>>>>>>>)", re.MULTILINE)
-    found = []
-    for rel in files:
-        path = ROOT / rel
+    found: list[str] = []
+    for relative in files:
+        path = ROOT / relative
         if not path.is_file():
             continue
         try:
             text = path.read_text(encoding="utf-8")
-        except (UnicodeDecodeError, OSError):
+        except (OSError, UnicodeDecodeError):
             continue
         if markers.search(text):
-            found.append(rel)
+            found.append(relative)
     if found:
-        raise GateFailure("merge-conflict markers found: " + ", ".join(found))
-    return "no merge-conflict markers"
+        raise GateFailure("merge-conflict markers: " + ", ".join(found))
+    return "no conflict markers"
 
 
 def check_actions_pinned() -> str:
     workflow_dir = ROOT / ".github" / "workflows"
-    violations = []
     if not workflow_dir.exists():
-        return "no workflows present"
-    use_pattern = re.compile(r"uses:\s*([^\s#]+)")
+        return "no workflows"
+    pattern = re.compile(r"uses:\s*([^\s#]+)")
+    violations: list[str] = []
     for path in workflow_dir.glob("*.y*ml"):
-        text = path.read_text(encoding="utf-8")
-        for match in use_pattern.finditer(text):
+        for match in pattern.finditer(path.read_text(encoding="utf-8")):
             action = match.group(1)
             if action.startswith("./"):
                 continue
@@ -190,45 +259,146 @@ def check_actions_pinned() -> str:
             if not re.fullmatch(r"[0-9a-fA-F]{40}", ref):
                 violations.append(f"{path.relative_to(ROOT)}: {action}")
     if violations:
-        raise GateFailure("third-party actions must use full commit SHAs: " + "; ".join(violations))
+        raise GateFailure("unpinned actions: " + "; ".join(violations))
     return "all external actions are SHA-pinned"
 
 
-def iter_glob(pattern: str) -> list[Path]:
-    return [path for path in ROOT.glob(pattern) if path.is_file() and ".git" not in path.parts]
+def waiver_patterns(contract: dict[str, Any] | None, types: set[str]) -> set[str]:
+    patterns: set[str] = set()
+    for waiver in (contract or {}).get("waivers", []):
+        if (
+            waiver.get("type") in types
+            and waiver.get("pattern")
+            and waiver.get("reason")
+            and waiver.get("approver")
+        ):
+            patterns.add(str(waiver["pattern"]))
+    return patterns
 
 
-def run_static_audits(config: dict[str, Any]) -> list[CheckResult]:
-    results: list[CheckResult] = []
-    for rule in config.get("audits", {}).get("regex", []):
+def check_test_deletions(base_ref: str, contract: dict[str, Any] | None) -> str:
+    deleted = [path for path in deleted_files(base_ref) if path.startswith("tests/") and path.endswith(".py")]
+    if not deleted:
+        return "no test files deleted"
+    patterns = waiver_patterns(contract, {"test_file_deletion"})
+    unwaived = [path for path in deleted if not any(fnmatch.fnmatch(path, p) for p in patterns)]
+    if unwaived:
+        raise GateFailure("test files deleted without waiver: " + ", ".join(unwaived))
+    return f"{len(deleted)} deleted test file(s) waived"
+
+
+def removed_test_definitions(base_ref: str) -> list[str]:
+    removed: list[str] = []
+    for line in committed_diff(base_ref).splitlines():
+        if not line.startswith("-") or line.startswith("---"):
+            continue
+        text = line[1:].strip()
+        if text.startswith("def test_") or text.startswith("async def test_") or text.startswith("class Test"):
+            removed.append(text)
+    return removed
+
+
+def check_removed_test_definitions(base_ref: str, contract: dict[str, Any] | None) -> str:
+    if not (contract or {}).get("forbid_test_removals", False):
+        return "test-definition removal inspection skipped"
+    removed = removed_test_definitions(base_ref)
+    if not removed:
+        return "no test definitions removed"
+    patterns = waiver_patterns(contract, {"test_removal"})
+    unwaived = [item for item in removed if not any(fnmatch.fnmatch(item, p) for p in patterns)]
+    if unwaived:
+        raise GateFailure("test definitions removed without waiver: " + "; ".join(unwaived))
+    return f"{len(removed)} removed test definition(s) waived"
+
+
+def parse_collection(output: str) -> set[str]:
+    return {
+        line.strip().split(" ", 1)[0]
+        for line in output.splitlines()
+        if line.strip().startswith("tests/") and "::" in line
+    }
+
+
+def collect_nodes(*, cwd: Path | None = None, label: str) -> set[str]:
+    code, output = run_process([sys.executable, "-m", "pytest", "--collect-only", "-q"], cwd=cwd)
+    if code != 0:
+        raise GateFailure(f"{label} test collection failed (exit {code}): {output.strip()}")
+    return parse_collection(output)
+
+
+def collection_evidence(base_ref: str, contract: dict[str, Any] | None) -> CollectionEvidence:
+    head_nodes = collect_nodes(label="HEAD")
+    base_sha = git("rev-parse", base_ref)
+    cleanup_error = ""
+    with tempfile.TemporaryDirectory(prefix="gate-base-") as directory:
+        worktree = Path(directory) / "worktree"
+        code, output = run_process(["git", "worktree", "add", "--detach", str(worktree), base_sha])
+        if code != 0:
+            raise GateFailure(f"base worktree creation failed: {output.strip()}")
+        try:
+            base_nodes = collect_nodes(cwd=worktree, label="base")
+        finally:
+            cleanup_code, cleanup_output = run_process(["git", "worktree", "remove", "--force", str(worktree)])
+            if cleanup_code != 0:
+                cleanup_error = cleanup_output.strip() or f"exit {cleanup_code}"
+    if cleanup_error:
+        raise GateFailure(f"base worktree cleanup failed: {cleanup_error}")
+    missing = sorted(base_nodes - head_nodes)
+    patterns = waiver_patterns(contract, {"test_node_removal", "test_removal"})
+    waived = [node for node in missing if any(fnmatch.fnmatch(node, p) for p in patterns)]
+    unwaived = [node for node in missing if node not in waived]
+    if unwaived:
+        preview = ", ".join(unwaived[:15])
+        raise GateFailure(f"test nodes disappeared: {preview}")
+    return CollectionEvidence(base_nodes, head_nodes, missing, waived)
+
+
+def execute_required_tests(contract: dict[str, Any] | None) -> list[dict[str, Any]]:
+    required = [str(item) for item in (contract or {}).get("required_tests", [])]
+    if not required:
+        return []
+    nodes = collect_nodes(label="HEAD")
+    selected: list[tuple[str, str]] = []
+    missing: list[str] = []
+    for pattern in required:
+        matches = sorted(node for node in nodes if fnmatch.fnmatch(node, pattern))
+        if not matches:
+            missing.append(pattern)
+        selected.extend((pattern, node) for node in matches)
+    if missing:
+        raise GateFailure("required tests not in collection: " + ", ".join(missing))
+    records: list[dict[str, Any]] = []
+    for pattern, node in selected:
         started = time.monotonic()
-        name = str(rule["name"])
-        pattern = re.compile(str(rule["pattern"]), re.MULTILINE)
-        severity = str(rule.get("severity", "error")).lower()
-        hits = []
-        for path in iter_glob(str(rule.get("glob", "**/*"))):
-            try:
-                text = path.read_text(encoding="utf-8")
-            except (UnicodeDecodeError, OSError):
-                continue
-            if pattern.search(text):
-                hits.append(str(path.relative_to(ROOT)).replace("\\", "/"))
-        status = "PASS"
-        detail = str(rule.get("message", ""))
-        if hits:
-            detail = f"{detail} Hits: {', '.join(hits)}".strip()
-            status = "WARN" if severity == "warning" else "FAIL"
-        results.append(CheckResult(name, status, time.monotonic() - started, detail))
-    return results
+        code, output = run_process([sys.executable, "-m", "pytest", "-q", node])
+        record = {
+            "pattern": pattern,
+            "node": node,
+            "collected": True,
+            "executed": True,
+            "exit_code": code,
+            "duration_seconds": round(time.monotonic() - started, 6),
+            "output": output.strip()[-2000:],
+        }
+        records.append(record)
+        if code != 0:
+            raise GateFailure(f"required test failed: {node} (exit {code})")
+    return records
 
 
-def execute_check(name: str, func: Any) -> CheckResult:
+def execute_check(name: str, function: Callable[[], str]) -> CheckResult:
     started = time.monotonic()
     try:
-        detail = str(func())
-        return CheckResult(name, "PASS", time.monotonic() - started, detail)
-    except Exception as exc:  # gate boundary: converted to safe report
+        return CheckResult(name, "PASS", time.monotonic() - started, str(function()))
+    except Exception as exc:
         return CheckResult(name, "FAIL", time.monotonic() - started, f"{type(exc).__name__}: {exc}")
+
+
+def run_command(name: str, argv: list[str]) -> CheckResult:
+    started = time.monotonic()
+    code, output = run_process(argv)
+    detail = output.strip()[-6000:]
+    return CheckResult(name, "PASS" if code == 0 else "FAIL", time.monotonic() - started, detail, argv, code)
 
 
 def configured_commands(config: dict[str, Any], level: str) -> list[dict[str, Any]]:
@@ -239,100 +409,200 @@ def configured_commands(config: dict[str, Any], level: str) -> list[dict[str, An
     return selected
 
 
-def run_command(spec: dict[str, Any]) -> CheckResult:
-    name = str(spec["name"])
-    argv = [str(item) for item in spec["argv"]]
-    started = time.monotonic()
-    code, output = run_process(argv)
-    output = output.strip()
-    if len(output) > 6000:
-        output = output[-6000:]
-    return CheckResult(
-        name=name,
-        status="PASS" if code == 0 else "FAIL",
-        duration_seconds=time.monotonic() - started,
-        detail=output,
-        command=argv,
-        exit_code=code,
-    )
+def run_audits(config: dict[str, Any]) -> list[CheckResult]:
+    results: list[CheckResult] = []
+    for rule in config.get("audits", {}).get("regex", []):
+        started = time.monotonic()
+        pattern = re.compile(str(rule["pattern"]), re.MULTILINE)
+        hits: list[str] = []
+        for path in ROOT.glob(str(rule.get("glob", "**/*"))):
+            if not path.is_file() or ".git" in path.parts:
+                continue
+            try:
+                if pattern.search(path.read_text(encoding="utf-8")):
+                    hits.append(str(path.relative_to(ROOT)).replace("\\", "/"))
+            except (OSError, UnicodeDecodeError):
+                continue
+        severity = str(rule.get("severity", "error")).lower()
+        status = "PASS" if not hits else ("WARN" if severity == "warning" else "FAIL")
+        detail = str(rule.get("message", ""))
+        if hits:
+            detail += " Hits: " + ", ".join(hits)
+        results.append(CheckResult(str(rule["name"]), status, time.monotonic() - started, detail))
+    return results
 
 
-def write_reports(config: dict[str, Any], level: str, results: list[CheckResult]) -> dict[str, Any]:
-    failed = [result for result in results if result.status == "FAIL"]
-    warnings = [result for result in results if result.status == "WARN"]
-    payload = {
-        "schema_version": 1,
-        "project": config.get("project", {}).get("name", ROOT.name),
-        "level": level,
-        "sha": current_sha(),
-        "branch": current_branch(),
-        "result": "BLOCKED" if failed else "PASS",
-        "violations_found": bool(failed),
-        "warning_count": len(warnings),
-        "checks": [asdict(result) for result in results],
-    }
-    gate = config["gate"]
-    json_path = ROOT / str(gate.get("report_json", "reports/pr-gate.json"))
-    md_path = ROOT / str(gate.get("report_markdown", "reports/pr-gate.md"))
-    json_path.parent.mkdir(parents=True, exist_ok=True)
-    md_path.parent.mkdir(parents=True, exist_ok=True)
-    json_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-
+def render_markdown(payload: dict[str, Any]) -> str:
     lines = [
         "# PR Gate Report",
         "",
         f"- Result: **{payload['result']}**",
-        f"- Level: `{level}`",
+        f"- Level: `{payload['level']}`",
         f"- Branch: `{payload['branch']}`",
-        f"- SHA: `{payload['sha']}`",
+        f"- SHA: `{payload['head_sha']}`",
+        f"- Base: `{payload['base_ref']}` (`{payload['base_sha']}`)",
+        f"- Contract SHA-256: `{payload['contract_sha256'] or 'N/A'}`",
         f"- Violations: `{str(payload['violations_found']).lower()}`",
         "",
         "## Checks",
         "",
     ]
-    for result in results:
-        lines.append(f"### {result.status} — {result.name}")
-        lines.append("")
-        if result.command:
-            lines.append(f"Command: `{' '.join(shlex.quote(item) for item in result.command)}`")
-            lines.append("")
-        if result.detail:
-            lines.append("```text")
-            lines.append(result.detail)
-            lines.append("```")
-            lines.append("")
-    md_path.write_text("\n".join(lines), encoding="utf-8")
-    return payload
+    for check in payload["checks"]:
+        lines += [f"### {check['status']} — {check['name']}", ""]
+        if check.get("command"):
+            lines += ["Command: `" + " ".join(shlex.quote(item) for item in check["command"]) + "`", ""]
+        if check.get("detail"):
+            lines += ["```text", str(check["detail"]), "```", ""]
+    return "\n".join(lines)
+
+
+def write_reports(config: dict[str, Any], payload: dict[str, Any]) -> None:
+    gate = config.get("gate", {})
+    json_path = ROOT / str(gate.get("report_json", "reports/pr-gate.json"))
+    md_path = ROOT / str(gate.get("report_markdown", "reports/pr-gate.md"))
+    delivery_path = ROOT / "reports" / "delivery-report.md"
+    for path in (json_path, md_path, delivery_path):
+        path.parent.mkdir(parents=True, exist_ok=True)
+    json_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    md_path.write_text(render_markdown(payload), encoding="utf-8")
+    delivery_path.write_text(
+        "\n".join(
+            [
+                "# Delivery Report",
+                "",
+                f"Completion status: {'COMPLETE' if payload['result'] == 'PASS' else 'BLOCKED'}",
+                f"Gate result: {payload['result']}",
+                f"Remote full SHA: {payload['head_sha']}",
+                f"Branch: {payload['branch']}",
+                f"Violations found: {str(payload['violations_found']).lower()}",
+                f"Changed files: {len(payload['changed_files'])}",
+                f"Tests collected: base={payload['base_collected_tests']} head={payload['head_collected_tests']}",
+                f"Missing test nodes: {len(payload['missing_test_nodes'])}",
+                "",
+                "Generated from reports/pr-gate.json.",
+            ]
+        ),
+        encoding="utf-8",
+    )
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--level", choices=LEVELS, default="gate")
+    parser.add_argument("--level", choices=list(LEVELS), default="gate")
+    parser.add_argument("--contract")
     args = parser.parse_args()
 
     config = load_config()
-    base_ref = resolve_base_ref(config)
-    try:
-        files = changed_files(base_ref)
-    except Exception:
-        files = []
+    contract_path = Path(args.contract) if args.contract else DEFAULT_CONTRACT
+    contract: dict[str, Any] | None = None
+    contract_hash: str | None = None
+    if args.contract and not contract_path.exists():
+        raise GateFailure(f"contract not found: {contract_path}")
+    if contract_path.exists():
+        try:
+            contract = json.loads(contract_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise GateFailure(f"invalid contract JSON: {exc}") from exc
+        contract_hash = hashlib.sha256(contract_path.read_bytes()).hexdigest()
 
+    base_ref, fallback_used, fallback_detail = validate_base_ref(config, contract)
+    files = changed_files(base_ref)
+    base_sha = git("rev-parse", base_ref)
+    initial_tree = filtered_status(config)
     results = [
-        execute_check("branch-and-sha", lambda: check_branch_and_sha(config)),
-        execute_check("changed-file-policy", lambda: check_changed_file_policy(config, files)),
-        execute_check("git-diff-check", check_diff),
-        execute_check("working-tree", lambda: check_worktree(config, args.level)),
+        execute_check("branch-and-sha", lambda: check_identity(config, contract)),
+        execute_check("changed-file-policy", lambda: check_file_policy(config, files, contract)),
+        execute_check("git-diff-check", lambda: check_diff(base_ref)),
+        execute_check("working-tree-initial", lambda: check_initial_tree(config, args.level)),
         execute_check("conflict-markers", lambda: check_conflict_markers(files)),
         execute_check("workflow-action-pinning", check_actions_pinned),
+        execute_check("test-file-deletions", lambda: check_test_deletions(base_ref, contract)),
+        execute_check("test-removals-in-diff", lambda: check_removed_test_definitions(base_ref, contract)),
     ]
-    results.extend(run_static_audits(config))
-    for command in configured_commands(config, args.level):
-        results.append(run_command(command))
 
-    payload = write_reports(config, args.level, results)
+    evidence: CollectionEvidence | None = None
+    if args.level in ("slice", "gate") or (contract and contract.get("forbid_test_removals")):
+        started = time.monotonic()
+        try:
+            evidence = collection_evidence(base_ref, contract)
+            results.append(
+                CheckResult(
+                    "test-collection-comparison",
+                    "PASS",
+                    time.monotonic() - started,
+                    f"base={len(evidence.base_nodes)} head={len(evidence.head_nodes)} missing={len(evidence.missing_nodes)}",
+                )
+            )
+        except Exception as exc:
+            results.append(CheckResult("test-collection-comparison", "FAIL", time.monotonic() - started, f"{type(exc).__name__}: {exc}"))
+
+    required_records: list[dict[str, Any]] = []
+    if contract and contract.get("required_tests"):
+        started = time.monotonic()
+        try:
+            required_records = execute_required_tests(contract)
+            results.append(CheckResult("required-tests", "PASS", time.monotonic() - started, f"{len(required_records)} node(s) executed"))
+        except Exception as exc:
+            results.append(CheckResult("required-tests", "FAIL", time.monotonic() - started, f"{type(exc).__name__}: {exc}"))
+
+    results.extend(run_audits(config))
+    focused_records: list[dict[str, Any]] = []
+    if contract and contract.get("focused_commands"):
+        repeat = max(1, int(contract.get("focused_repeat_count", 1)))
+        for iteration in range(1, repeat + 1):
+            for index, command in enumerate(contract["focused_commands"], 1):
+                argv = [str(item) for item in command] if isinstance(command, list) else shlex.split(str(command))
+                result = run_command(f"focused-{iteration}-{index}", argv)
+                results.append(result)
+                focused_records.append({
+                    "iteration": iteration,
+                    "command": argv,
+                    "status": result.status,
+                    "exit_code": result.exit_code,
+                    "duration_seconds": result.duration_seconds,
+                })
+
+    for spec in configured_commands(config, args.level):
+        results.append(run_command(str(spec["name"]), [str(item) for item in spec["argv"]]))
+
+    final_status, final_detail, final_tree = check_final_tree(initial_tree, config)
+    results.append(CheckResult("working-tree-final", final_status, 0.0, final_detail))
+    failures = [result for result in results if result.status == "FAIL"]
+    payload = {
+        "schema_version": 3,
+        "project": config.get("project", {}).get("name", ROOT.name),
+        "level": args.level,
+        "branch": source_branch(),
+        "head_sha": source_sha(),
+        "base_ref": base_ref,
+        "base_sha": base_sha,
+        "base_fallback_used": fallback_used,
+        "fallback_detail": fallback_detail,
+        "contract_sha256": contract_hash,
+        "run_nonce": os.getenv("GATE_RUN_NONCE") or uuid.uuid4().hex,
+        "result": "BLOCKED" if failures else "PASS",
+        "violations_found": bool(failures),
+        "changed_files": files,
+        "test_files_deleted": [path for path in deleted_files(base_ref) if path.startswith("tests/")],
+        "removed_test_definitions": removed_test_definitions(base_ref),
+        "base_collected_tests": len(evidence.base_nodes) if evidence else None,
+        "head_collected_tests": len(evidence.head_nodes) if evidence else None,
+        "missing_test_nodes": evidence.missing_nodes if evidence else [],
+        "required_test_executions": required_records,
+        "focused_repeat_results": focused_records,
+        "initial_working_tree_status": initial_tree or "clean",
+        "final_working_tree_status": final_tree or "clean",
+        "checks": [asdict(result) for result in results],
+        "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+    write_reports(config, payload)
     print(json.dumps(payload, indent=2, ensure_ascii=False))
     return 0 if payload["result"] == "PASS" else 1
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        raise SystemExit(main())
+    except GateFailure as exc:
+        print(f"BLOCKED: {exc}", file=sys.stderr)
+        raise SystemExit(1) from None
