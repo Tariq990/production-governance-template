@@ -4,8 +4,8 @@
     {
       "rule": "sys_path_insert",
       "path": "tests/conftest.py",
-      "line_index": 7,
-      "snippet_hash": "b3899e0da4b970215583b6156f8583fd2f9b8e86c83d301ac357341295bd4373",
+      "line_index": 9,
+      "snippet_hash": "1b669c07ac56ebab231277e7ffcd5ff23cf9287c70045bd40a8adf3c10984178",
       "reason": "Pytest imports governance scripts without packaging.",
       "owner": "@Tariq990",
       "issue": "template-bootstrap",
