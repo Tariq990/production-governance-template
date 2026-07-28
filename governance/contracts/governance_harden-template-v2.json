@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "expected_branch": "governance/harden-template-v2",
+  "base_ref": "origin/main",
+  "allowed_files": [
+    ".gate/task-contract.example.json",
+    ".gitattributes",
+    ".github/CODEOWNERS",
+    ".github/workflows/governance.yml",
+    ".github/workflows/quality-gate.yml",
+    ".githooks/pre-push",
+    ".gitignore",
+    "AGENTS.md",
+    "README.md",
+    "docs/ADOPTION_CHECKLIST.md",
+    "docs/OPERATING_MODEL.md",
+    "governance.toml",
+    "governance/contracts/README.md",
+    "policy_baseline.json",
+    "scripts/install_governance_hooks.py",
+    "scripts/pr_gate.py",
+    "scripts/pr_gate_ci.py",
+    "scripts/pre_push_guard.py",
+    "scripts/verified_push.py",
+    "scripts/verify_repo_policy.py",
+    "scripts/verify_repo_policy_stable.py",
+    "tests/conftest.py",
+    "tests/test_pr_gate.py",
+    "tests/test_pr_gate_ci.py",
+    "tests/test_pre_push_guard.py",
+    "tests/test_verified_push.py",
+    "tests/test_verify_repo_policy.py",
+    "tests/test_verify_repo_policy_stable.py"
+  ],
+  "protected_paths": [
+    "data/production/",
+    "secrets/",
+    "private_keys/"
+  ],
+  "required_tests": [
+    "tests/test_pr_gate.py::*",
+    "tests/test_pr_gate_ci.py::*",
+    "tests/test_pre_push_guard.py::*",
+    "tests/test_verified_push.py::*",
+    "tests/test_verify_repo_policy.py::*",
+    "tests/test_verify_repo_policy_stable.py::*"
+  ],
+  "focused_commands": [
+    ["python", "-m", "pytest", "-q", "tests"]
+  ],
+  "focused_repeat_count": 2,
+  "forbid_test_removals": true,
+  "waivers": []
+}
