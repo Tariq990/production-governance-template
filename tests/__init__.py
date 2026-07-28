@@ -1,0 +1,1 @@
+"""Template gate tests."""

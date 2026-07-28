@@ -1,0 +1,17 @@
+# Copy relevant sections into governance.toml for a Python service.
+# Install these tools in the project environment or CI before running the gate.
+[[commands.fast]]
+name = "ruff"
+argv = ["python", "-m", "ruff", "check", "."]
+
+[[commands.slice]]
+name = "feature-tests"
+argv = ["python", "-m", "pytest", "tests/feature", "-q"]
+
+[[commands.gate]]
+name = "full-tests"
+argv = ["python", "-m", "pytest", "-q"]
+
+[[commands.gate]]
+name = "mypy"
+argv = ["python", "-m", "mypy", "src", "tests"]

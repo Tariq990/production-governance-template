@@ -1,0 +1,52 @@
+[project]
+name = "production-governance-template"
+default_branch = "main"
+
+[gate]
+report_json = "reports/pr-gate.json"
+report_markdown = "reports/pr-gate.md"
+base_ref = "HEAD~1"
+require_clean_tree_on_gate = true
+ignore_dirty_paths = ["reports/"]
+forbidden_paths = [
+  ".env",
+  ".env.*",
+  "secrets/",
+  "private_keys/",
+  "data/production/",
+]
+forbidden_extensions = [".pem", ".key", ".p12", ".pfx"]
+allowed_branch_patterns = ["main", "feature/*", "fix/*", "governance/*", "docs/*", "test/*"]
+
+# Optional environment controls:
+# EXPECTED_HEAD_SHA=<full sha>
+# EXPECTED_BRANCH=<branch>
+# GATE_BASE_REF=<git ref>
+# GATE_ALLOWED_FILES=comma,separated,paths
+
+[[commands.fast]]
+name = "compileall"
+argv = ["python", "-m", "compileall", "-q", "scripts", "tests"]
+
+[[commands.slice]]
+name = "focused-tests"
+argv = ["python", "-m", "unittest", "tests.test_pr_gate", "-v"]
+
+[[commands.gate]]
+name = "full-tests"
+argv = ["python", "-m", "unittest", "discover", "-s", "tests", "-p", "test_*.py", "-v"]
+
+# Static audit examples. Add project-specific rules here.
+[[audits.regex]]
+name = "no-blanket-exception-suppression"
+glob = "**/*.py"
+pattern = "contextlib\\.suppress\\(Exception\\)"
+severity = "warning"
+message = "Broad exception suppression hides unexpected failures; use safe structured logging."
+
+[[audits.regex]]
+name = "no-raw-secret-files"
+glob = "**/*"
+pattern = "-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----"
+severity = "error"
+message = "Private key material must never be committed."

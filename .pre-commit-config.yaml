@@ -1,0 +1,17 @@
+minimum_pre_commit_version: "3.7.0"
+default_install_hook_types: [pre-commit, pre-push]
+repos:
+  - repo: local
+    hooks:
+      - id: governance-fast
+        name: governance fast gate
+        entry: python scripts/pr_gate.py --level fast
+        language: system
+        pass_filenames: false
+        stages: [pre-commit]
+      - id: governance-slice
+        name: governance slice gate
+        entry: python scripts/pr_gate.py --level slice
+        language: system
+        pass_filenames: false
+        stages: [pre-push]

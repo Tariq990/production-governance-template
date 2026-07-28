@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.nox/
+.venv/
+.env
+.env.*
+reports/*.json
+reports/*.md
+!reports/.gitkeep

@@ -1,0 +1,12 @@
+# Copy relevant sections into governance.toml for a Node project.
+[[commands.fast]]
+name = "lint"
+argv = ["npm", "run", "lint"]
+
+[[commands.slice]]
+name = "unit-tests"
+argv = ["npm", "test", "--", "--runInBand"]
+
+[[commands.gate]]
+name = "build"
+argv = ["npm", "run", "build"]
