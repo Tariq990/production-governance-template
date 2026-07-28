@@ -6,7 +6,8 @@ on:
     branches: [main]
 
 jobs:
-  quality-gate:
-    runs-on: ubuntu-latest
+  gate:
+    runs-on: ubuntu-24.04
     steps:
-      - run: echo "hello world"
+      - name: Hello
+        run: echo ok
