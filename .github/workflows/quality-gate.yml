@@ -13,16 +13,41 @@ jobs:
   quality-gate:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      GATE_SOURCE_BRANCH: ${{ github.head_ref || github.ref_name }}
+      GATE_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
 
-      - name: Show runtime
+      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+        with:
+          python-version: "3.12"
+
+      - name: Install governance dependencies
+        run: python -m pip install pytest ruff mypy
+
+      - name: Load owner-approved task contract
+        if: github.event_name == 'pull_request'
+        shell: bash
         run: |
-          python3 --version
-          git rev-parse HEAD
+          safe_branch="${GITHUB_HEAD_REF//\//_}"
+          contract="governance/contracts/${safe_branch}.json"
+          git show "origin/${GITHUB_BASE_REF}:${contract}" > .gate/ci-contract.json
+          test -s .gate/ci-contract.json
 
-      - name: Run authoritative dependency-free gate
-        run: python3 scripts/pr_gate.py --level gate
+      - name: Run authoritative quality gate
+        if: github.event_name == 'pull_request'
+        env:
+          GATE_TRUSTED_CONTRACT_PATH: .gate/ci-contract.json
+        run: python scripts/pr_gate_ci.py
+
+      - name: Run default-branch quality gate
+        if: github.event_name != 'pull_request'
+        env:
+          GATE_BASE_REF: HEAD~1
+        run: python scripts/pr_gate.py --level gate
 
       - name: Print machine-readable result
         if: always()
