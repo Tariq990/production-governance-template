@@ -24,6 +24,18 @@ argv = ["python", "-m", "pytest", "-q", "tests"]
 name = "full-tests"
 argv = ["python", "-m", "pytest", "-q"]
 
+[[commands.gate]]
+name = "ruff"
+argv = ["python", "-m", "ruff", "check", "."]
+
+[[commands.gate]]
+name = "mypy"
+argv = ["python", "-m", "mypy", "scripts", "--no-site-packages"]
+
+[[commands.gate]]
+name = "repository-policy"
+argv = ["python", "scripts/verify_repo_policy_stable.py", "--root", ".", "--json"]
+
 [[audits.regex]]
 name = "no-blanket-exception-suppression"
 glob = "**/*.py"
