@@ -1,0 +1,7 @@
+# Force LF line endings for files that must use Unix-style endings
+*.yml text eol=lf
+*.yaml text eol=lf
+*.sh text eol=lf
+*.py text eol=lf
+*.toml text eol=lf
+*.md text eol=lf
