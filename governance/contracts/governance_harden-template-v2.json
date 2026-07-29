@@ -17,6 +17,7 @@
     "governance.toml",
     "governance/contracts/README.md",
     "policy_baseline.json",
+    "ruff.toml",
     "scripts/install_governance_hooks.py",
     "scripts/pr_gate.py",
     "scripts/pr_gate_ci.py",
