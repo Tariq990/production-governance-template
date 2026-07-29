@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Fail-closed pre-push proof validation."""
 from __future__ import annotations
 
@@ -10,15 +9,24 @@ from pathlib import Path
 
 
 def git(*args: str) -> str:
-    completed = subprocess.run(["git", *args], text=True, capture_output=True, check=False)
+    completed = subprocess.run(
+        ["git", *args],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
     if completed.returncode != 0:
-        raise RuntimeError(completed.stderr.strip() or completed.stdout.strip())
+        raise RuntimeError(
+            completed.stderr.strip() or completed.stdout.strip()
+        )
     return completed.stdout.strip()
 
 
 def git_path(path: str) -> Path:
     candidate = Path(git("rev-parse", "--git-path", path))
-    return candidate if candidate.is_absolute() else Path(git("rev-parse", "--show-toplevel")) / candidate
+    if candidate.is_absolute():
+        return candidate
+    return Path(git("rev-parse", "--show-toplevel")) / candidate
 
 
 def main() -> int:
@@ -37,12 +45,24 @@ def main() -> int:
     try:
         contract_data = json.loads(contract.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
-        print(f"pre-push: BLOCKED — invalid contract: {exc}", file=sys.stderr)
+        print(
+            f"pre-push: BLOCKED — invalid contract: {exc}",
+            file=sys.stderr,
+        )
         return 1
-    if contract_data.get("expected_branch") and contract_data["expected_branch"] != branch:
-        print("pre-push: BLOCKED — contract branch mismatch", file=sys.stderr)
+    if (
+        contract_data.get("expected_branch")
+        and contract_data["expected_branch"] != branch
+    ):
+        print(
+            "pre-push: BLOCKED — contract branch mismatch",
+            file=sys.stderr,
+        )
         return 1
-    if contract_data.get("expected_head_sha") and contract_data["expected_head_sha"] != head:
+    if (
+        contract_data.get("expected_head_sha")
+        and contract_data["expected_head_sha"] != head
+    ):
         print("pre-push: BLOCKED — contract SHA mismatch", file=sys.stderr)
         return 1
     contract_digest = hashlib.sha256(contract.read_bytes()).hexdigest()
@@ -79,10 +99,16 @@ def main() -> int:
             or report_data.get("head_sha") != head
             or report_data.get("contract_sha256") != contract_digest
         ):
-            print("pre-push: BLOCKED — report identity/result mismatch", file=sys.stderr)
+            print(
+                "pre-push: BLOCKED — report identity/result mismatch",
+                file=sys.stderr,
+            )
             return 1
         return 0
-    print(f"pre-push: BLOCKED — no valid proof for {head[:12]}", file=sys.stderr)
+    print(
+        f"pre-push: BLOCKED — no valid proof for {head[:12]}",
+        file=sys.stderr,
+    )
     return 1
 
 
