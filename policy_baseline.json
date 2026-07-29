@@ -1,0 +1,15 @@
+{
+  "description": "Approved policy exceptions identified by rule, path, and snippet hash. Line numbers are diagnostic only.",
+  "entries": [
+    {
+      "rule": "sys_path_insert",
+      "path": "tests/conftest.py",
+      "line_index": 9,
+      "snippet_hash": "1b669c07ac56ebab231277e7ffcd5ff23cf9287c70045bd40a8adf3c10984178",
+      "reason": "Pytest imports governance scripts without packaging.",
+      "owner": "@Tariq990",
+      "issue": "template-bootstrap",
+      "expires_on": "2027-12-31"
+    }
+  ]
+}

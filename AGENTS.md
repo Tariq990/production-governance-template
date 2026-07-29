@@ -1,80 +1,58 @@
 # Agent Operating Contract
 
-These instructions apply to every coding agent working in this repository.
+These rules apply to every coding agent in repositories created from this template.
 
 ## Before modifying files
 
-1. Fetch the current remote branch.
-2. Verify the expected branch and SHA when supplied.
-3. Verify the working tree is clean.
-4. Read the PR objective, non-goals, contracts, and allowed-file scope.
-5. Inspect every production path affected by the requested behavior.
+1. Fetch the current remote branch and verify the full SHA.
+2. Confirm the expected branch, clean working tree, task contract, allowed files, and protected paths.
+3. Inspect every production entry point affected by the requested behavior.
 
-## During implementation
+## Implementation integrity
 
-- Implement the complete requested slice, not only the first visible call site.
-- Preserve existing public behavior unless the task explicitly changes it.
-- Do not hide unexpected failures silently.
-- Do not expose raw exception text, tokens, credentials, or provider responses.
-- Do not introduce synchronous network work inside an async event loop.
-- Use one authoritative helper rather than duplicating production logic.
-- Tests must invoke real production entry points when claiming route, worker, CLI, or agent coverage.
-- A helper-only test must never be described as full production-path coverage.
+- Complete the requested slice; a helper-only implementation is not production-path completion.
+- Never weaken an approved task contract: do not remove required tests, widen allowed files, clear protected paths, or alter approval metadata. Approved contracts are owner-controlled.
+- Never make tests pass by deleting, replacing, skipping, xfail-ing, or renaming required behavior.
+- Preserve test node IDs unless an explicit waiver includes a reason and approver.
+- Do not hide unexpected failures, secrets, provider responses, or raw exception text.
 
-## Validation
+## Required validation
 
-Run while developing:
+During development:
 
 ```bash
 python scripts/pr_gate.py --level fast
 ```
 
-Before declaring a slice complete:
+Before review:
 
 ```bash
-python scripts/pr_gate.py --level slice
+python scripts/pr_gate.py --level slice --contract .gate/task-contract.json
 ```
 
-Before pushing or requesting final review:
+Before push:
 
 ```bash
-python scripts/pr_gate.py --level gate
+python scripts/install_governance_hooks.py
+python scripts/verified_push.py --contract .gate/task-contract.json
 ```
 
-A task is not complete unless:
+Never substitute a direct push or any bypass:
 
-- the command exits zero;
-- `reports/pr-gate.json` contains `"result": "PASS"`;
-- no machine-readable assertion reports a violation;
-- the working tree state matches the task contract;
-- no forbidden or out-of-scope files changed.
+- `git push`
+- `git push --no-verify`
+- manually fabricated proof files
+- proof fabrication
+- history rewriting, rebase, force-push, or amend to escape a blocked gate
 
-Never write “all gates pass” when the JSON report says otherwise.
+When the gate reports `BLOCKED`, fix the cause or return `Progress Report — Incomplete`. Do not claim completion.
 
-## Git safety
+The stable policy runner is:
 
-Do not, unless explicitly authorized:
+```bash
+python scripts/verify_repo_policy_stable.py --root . --json
+```
 
-- force-push;
-- rebase a reviewed branch;
-- rewrite history;
-- merge;
-- mark a Draft PR Ready;
-- modify PR metadata;
-- disable or bypass checks;
-- add blanket ignores;
-- alter baselines merely to conceal a new violation.
+## Final reporting
 
-## Final report
-
-Return facts, not impressions:
-
-- old and new full SHA;
-- exact files changed;
-- behavior implemented;
-- production paths audited;
-- focused and full test counts;
-- gate report path and result;
-- policy result;
-- clean-tree status;
-- known limitations separated into blockers and follow-ups.
+A final report must cite the remote full SHA, exact changed files, production paths, focused and full test counts, report result, policy result, data diff, and clean-tree status. `reports/pr-gate.json` is authoritative; prose must never contradict it.

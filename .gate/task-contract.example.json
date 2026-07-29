@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "expected_branch": "feature/example",
+  "base_ref": "origin/main",
+  "allowed_files": [
+    "src/example.py",
+    "tests/test_example.py"
+  ],
+  "protected_paths": [
+    "data/production/",
+    ".github/workflows/",
+    "governance/contracts/"
+  ],
+  "required_tests": [
+    "tests/test_example.py::test_example"
+  ],
+  "focused_commands": [
+    ["python", "-m", "pytest", "-q", "tests/test_example.py"]
+  ],
+  "focused_repeat_count": 2,
+  "forbid_test_removals": true,
+  "waivers": []
+}

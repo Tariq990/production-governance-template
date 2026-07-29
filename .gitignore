@@ -10,3 +10,5 @@ __pycache__/
 reports/*.json
 reports/*.md
 !reports/.gitkeep
+.gate/task-contract.json
+.gate/ci-contract.json

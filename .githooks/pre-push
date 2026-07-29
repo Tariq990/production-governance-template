@@ -1,0 +1,12 @@
+#!/bin/sh
+set -eu
+ROOT=$(git rev-parse --show-toplevel)
+if command -v python >/dev/null 2>&1; then
+  exec python "$ROOT/scripts/pre_push_guard.py"
+elif command -v py >/dev/null 2>&1; then
+  exec py -3 "$ROOT/scripts/pre_push_guard.py"
+elif command -v python3 >/dev/null 2>&1; then
+  exec python3 "$ROOT/scripts/pre_push_guard.py"
+fi
+echo "pre-push: BLOCKED — Python 3 interpreter not found" >&2
+exit 1

@@ -1,5 +1,12 @@
 * @Tariq990
-/.github/ @Tariq990
+/governance/ @Tariq990
+/.github/workflows/ @Tariq990
 /governance.toml @Tariq990
-/scripts/pr_gate.py @Tariq990
 /AGENTS.md @Tariq990
+/scripts/pr_gate.py @Tariq990
+/scripts/pr_gate_ci.py @Tariq990
+/scripts/verified_push.py @Tariq990
+/scripts/pre_push_guard.py @Tariq990
+/scripts/verify_repo_policy.py @Tariq990
+/scripts/verify_repo_policy_stable.py @Tariq990
+/policy_baseline.json @Tariq990
