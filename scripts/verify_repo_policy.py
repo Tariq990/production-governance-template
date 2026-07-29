@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Small generic repository policy checker."""
 from __future__ import annotations
 
@@ -26,7 +25,8 @@ def load_baseline() -> list[dict[str, Any]]:
         EXIT = 1
         return []
     try:
-        return list(json.loads(path.read_text(encoding="utf-8")).get("entries", []))
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return list(data.get("entries", []))
     except (json.JSONDecodeError, OSError) as exc:
         print(f"[POLICY] invalid baseline: {exc}")
         EXIT = 1
@@ -34,7 +34,13 @@ def load_baseline() -> list[dict[str, Any]]:
 
 
 def tracked_files(root: Path) -> list[Path]:
-    return [path for path in root.rglob("*") if path.is_file() and ".git" not in path.parts and "reports" not in path.parts]
+    return [
+        path
+        for path in root.rglob("*")
+        if path.is_file()
+        and ".git" not in path.parts
+        and "reports" not in path.parts
+    ]
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -47,7 +53,10 @@ def main(argv: list[str] | None = None) -> int:
     EXIT = 0
     entries = load_baseline()
     approved = {
-        (str(entry.get("path", "")).replace("\\", "/"), str(entry.get("snippet_hash", "")))
+        (
+            str(entry.get("path", "")).replace("\\", "/"),
+            str(entry.get("snippet_hash", "")),
+        )
         for entry in entries
         if entry.get("rule") == "sys_path_insert"
     }
@@ -63,7 +72,9 @@ def main(argv: list[str] | None = None) -> int:
             if PATH_TOKEN in stripped and not stripped.startswith("#"):
                 identity = (relative, sha256_text(stripped))
                 if identity not in approved:
-                    violations.append(f"{relative}: line {number}: unapproved {PATH_TOKEN}")
+                    violations.append(
+                        f"{relative}: line {number}: unapproved {PATH_TOKEN}"
+                    )
         if relative.startswith(".github/workflows/"):
             text = "\n".join(lines)
             if "|| true" in text:
@@ -73,7 +84,9 @@ def main(argv: list[str] | None = None) -> int:
                     continue
                 ref = action.rsplit("@", 1)[-1] if "@" in action else ""
                 if not re.fullmatch(r"[0-9a-fA-F]{40}", ref):
-                    violations.append(f"{relative}: unpinned action {action}")
+                    violations.append(
+                        f"{relative}: unpinned action {action}"
+                    )
         private_key_token = "-----BEGIN " + "PRIVATE KEY-----"
         if private_key_token in "\n".join(lines):
             violations.append(f"{relative}: private key material")
@@ -82,7 +95,12 @@ def main(argv: list[str] | None = None) -> int:
     EXIT = 1 if violations or EXIT else 0
     payload = {
         "exit_code": EXIT,
-        "checks_run": ["sys_path_insert", "or_true_in_workflow", "unpinned_actions", "hardcoded_secrets"],
+        "checks_run": [
+            "sys_path_insert",
+            "or_true_in_workflow",
+            "unpinned_actions",
+            "hardcoded_secrets",
+        ],
         "violations_found": bool(EXIT),
     }
     if args.json:
