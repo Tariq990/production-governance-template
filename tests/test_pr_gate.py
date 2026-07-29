@@ -1,10 +1,39 @@
 from __future__ import annotations
 
+import unittest
 from pathlib import Path
 
+import pr_gate
 import pytest
 
-import pr_gate
+
+class GateContractTests(unittest.TestCase):
+    def test_levels_are_monotonic(self) -> None:
+        self.assertEqual(pr_gate.LEVELS, {"fast": 1, "slice": 2, "gate": 3})
+
+    def test_path_rules(self) -> None:
+        self.assertTrue(
+            pr_gate.path_matches_rule(
+                "data/production/a.json", "data/production/"
+            )
+        )
+        self.assertTrue(pr_gate.path_matches_rule(".env", ".env"))
+        self.assertTrue(pr_gate.path_matches_rule(".env.production", ".env.*"))
+        self.assertFalse(
+            pr_gate.path_matches_rule("docs/environment.md", ".env")
+        )
+
+    def test_config_loads(self) -> None:
+        config = pr_gate.load_config()
+        self.assertEqual(
+            config["project"]["name"], "production-governance-template"
+        )
+        self.assertTrue(config["commands"]["gate"])
+
+    def test_report_schema_fields(self) -> None:
+        result = pr_gate.CheckResult("demo", "PASS", 0.01, "ok")
+        self.assertEqual(result.name, "demo")
+        self.assertEqual(result.status, "PASS")
 
 
 class TempDir:
@@ -23,19 +52,25 @@ def test_levels_are_monotonic():
 
 
 def test_path_matching():
-    assert pr_gate.path_matches_rule("data/production/a.json", "data/production/")
+    assert pr_gate.path_matches_rule(
+        "data/production/a.json", "data/production/"
+    )
     assert pr_gate.path_matches_rule(".env.prod", ".env.*")
     assert not pr_gate.path_matches_rule("docs/env.md", ".env")
 
 
 def test_explicit_invalid_base_fails_closed(monkeypatch):
-    monkeypatch.setattr(pr_gate, "run_process", lambda argv, **kwargs: (1, "bad ref"))
+    monkeypatch.setattr(
+        pr_gate, "run_process", lambda argv, **kwargs: (1, "bad ref")
+    )
     with pytest.raises(pr_gate.GateFailure, match="not resolvable"):
         pr_gate.validate_base_ref({"gate": {}}, {"base_ref": "missing"})
 
 
 def test_changed_files_failure_is_not_hidden(monkeypatch):
-    monkeypatch.setattr(pr_gate, "run_process", lambda argv, **kwargs: (128, "bad diff"))
+    monkeypatch.setattr(
+        pr_gate, "run_process", lambda argv, **kwargs: (128, "bad diff")
+    )
     with pytest.raises(pr_gate.GateFailure, match="bad diff"):
         pr_gate.changed_files("missing")
 
@@ -71,7 +106,9 @@ def test_protected_path_blocks():
 
 
 def test_deleted_test_blocks(monkeypatch):
-    monkeypatch.setattr(pr_gate, "deleted_files", lambda base: ["tests/test_old.py"])
+    monkeypatch.setattr(
+        pr_gate, "deleted_files", lambda base: ["tests/test_old.py"]
+    )
     with pytest.raises(pr_gate.GateFailure, match="without waiver"):
         pr_gate.check_test_deletions("base", None)
 
