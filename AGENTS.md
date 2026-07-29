@@ -53,6 +53,19 @@ The stable policy runner is:
 python scripts/verify_repo_policy_stable.py --root . --json
 ```
 
+## Authorizing future task contracts
+
+Use the fixed `governance/contract-administration` branch when a new trusted
+task contract is needed. Copy `.gate/task-contract.example.json` byte-for-byte
+to the untracked `.gate/task-contract.json`, add only owner-approved JSON files
+under `governance/contracts/`, and use `scripts/verified_push.py`.
+
+Encode the task branch in the contract filename by replacing `/` with `__`.
+The administration gate rejects implementation files, broad file patterns,
+waivers, missing protected production/secret paths, non-`main` bases, missing
+tests or focused commands, and mismatched owner metadata. Never combine
+contract authorization with implementation work.
+
 ## Final reporting
 
 A final report must cite the remote full SHA, exact changed files, production paths, focused and full test counts, report result, policy result, data diff, and clean-tree status. `reports/pr-gate.json` is authoritative; prose must never contradict it.

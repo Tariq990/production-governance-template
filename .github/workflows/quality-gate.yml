@@ -32,9 +32,20 @@ jobs:
         if: github.event_name == 'pull_request'
         shell: bash
         run: |
-          safe_branch="${GITHUB_HEAD_REF//\//_}"
-          contract="governance/contracts/${safe_branch}.json"
-          git show "origin/${GITHUB_BASE_REF}:${contract}" > .gate/ci-contract.json
+          encoded_branch="${GITHUB_HEAD_REF//\//__}"
+          contract="governance/contracts/${encoded_branch}.json"
+          legacy_branch="${GITHUB_HEAD_REF//\//_}"
+          legacy_contract="governance/contracts/${legacy_branch}.json"
+          if git cat-file -e "origin/${GITHUB_BASE_REF}:${contract}" 2>/dev/null; then
+            git show "origin/${GITHUB_BASE_REF}:${contract}" > .gate/ci-contract.json
+          elif git cat-file -e "origin/${GITHUB_BASE_REF}:${legacy_contract}" 2>/dev/null; then
+            git show "origin/${GITHUB_BASE_REF}:${legacy_contract}" > .gate/ci-contract.json
+          elif [[ "${GITHUB_HEAD_REF}" == "governance/contract-administration" ]]; then
+            git show "origin/${GITHUB_BASE_REF}:.gate/task-contract.example.json" > .gate/ci-contract.json
+          else
+            echo "BLOCKED: owner-approved contract not found at ${contract}" >&2
+            exit 1
+          fi
           test -s .gate/ci-contract.json
 
       - name: Run authoritative quality gate
