@@ -1,23 +1,30 @@
 {
   "schema_version": 1,
-  "expected_branch": "feature/example",
+  "contract_id": "standing-contract-administration",
+  "expected_branch": "governance/contract-administration",
+  "expected_head_sha": "",
   "base_ref": "origin/main",
-  "allowed_files": [
-    "src/example.py",
-    "tests/test_example.py"
+  "allowed_file_patterns": [
+    "governance/contracts/*.json"
   ],
   "protected_paths": [
     "data/production/",
-    ".github/workflows/",
-    "governance/contracts/"
+    "secrets/",
+    "private_keys/"
   ],
   "required_tests": [
-    "tests/test_example.py::test_example"
+    "tests/test_pr_gate.py::test_valid_contract_administration",
+    "tests/test_pr_gate.py::test_contract_branch_filename_mismatch_blocks",
+    "tests/test_pr_gate.py::test_broad_task_contract_scope_blocks"
   ],
   "focused_commands": [
-    ["python", "-m", "pytest", "-q", "tests/test_example.py"]
+    ["python", "-m", "pytest", "-q", "tests/test_pr_gate.py"]
   ],
-  "focused_repeat_count": 2,
+  "focused_repeat_count": 1,
   "forbid_test_removals": true,
-  "waivers": []
+  "waivers": [],
+  "contract_administration": true,
+  "contract_approver": "Tariq990",
+  "approved_by": "Tariq990",
+  "approval_reason": "Standing owner-controlled lane for adding exact fail-closed task contracts only."
 }

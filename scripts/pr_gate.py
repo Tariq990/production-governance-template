@@ -119,15 +119,21 @@ def git_lines(*args: str) -> list[str]:
 
 
 def changed_files(base_ref: str) -> list[str]:
-    return sorted(set(git_lines("diff", "--name-only", f"{base_ref}...HEAD")))
+    return sorted(set(git_lines("diff", "--name-only", base_ref, "HEAD")))
 
 
 def deleted_files(base_ref: str) -> list[str]:
-    return sorted(set(git_lines("diff", "--name-only", "--diff-filter=D", f"{base_ref}...HEAD")))
+    return sorted(
+        set(
+            git_lines(
+                "diff", "--name-only", "--diff-filter=D", base_ref, "HEAD"
+            )
+        )
+    )
 
 
 def committed_diff(base_ref: str) -> str:
-    code, output = run_process(["git", "diff", f"{base_ref}...HEAD"])
+    code, output = run_process(["git", "diff", base_ref, "HEAD"])
     if code != 0:
         raise GateFailure(output.strip() or "unable to read committed diff")
     return output
@@ -170,10 +176,25 @@ def check_file_policy(
     extensions = [str(item) for item in gate.get("forbidden_extensions", [])]
     violations = [path for path in files if any(path_matches_rule(path, rule) for rule in forbidden)]
     violations += [path for path in files if any(path.endswith(ext) for ext in extensions)]
-    if contract:
-        allowed = set(str(item) for item in contract.get("allowed_files", []))
-        if allowed:
-            violations += [path for path in files if path not in allowed]
+    if contract is not None:
+        allowed = {
+            str(item).replace("\\", "/")
+            for item in contract.get("allowed_files", [])
+        }
+        allowed_patterns = [
+            str(item).replace("\\", "/")
+            for item in contract.get("allowed_file_patterns", [])
+        ]
+        if not allowed and not allowed_patterns:
+            raise GateFailure("contract has no allowed file scope")
+        violations += [
+            path
+            for path in files
+            if path not in allowed
+            and not any(
+                path_matches_rule(path, rule) for rule in allowed_patterns
+            )
+        ]
         protected = [str(item) for item in contract.get("protected_paths", [])]
         violations += [
             path for path in files if any(path_matches_rule(path, rule) for rule in protected)
@@ -183,9 +204,102 @@ def check_file_policy(
     return f"{len(files)} changed file(s) accepted"
 
 
+def check_contract_administration(
+    files: list[str],
+    contract: dict[str, Any] | None,
+    *,
+    root: Path = ROOT,
+) -> str:
+    """Validate contracts added through the standing owner-controlled lane."""
+    if not contract or not contract.get("contract_administration"):
+        return "not applicable"
+    if not files:
+        raise GateFailure("contract administration change is empty")
+
+    approver = str(contract.get("contract_approver", "")).strip()
+    if not approver:
+        raise GateFailure("contract administration approver is missing")
+    required_protected = {"data/production/", "secrets/", "private_keys/"}
+
+    for path in files:
+        normalized = path.replace("\\", "/")
+        if (
+            not normalized.startswith("governance/contracts/")
+            or not normalized.endswith(".json")
+        ):
+            raise GateFailure(
+                "contract administration may only change contract JSON: "
+                + normalized
+            )
+        contract_file = root / normalized
+        if not contract_file.is_file():
+            raise GateFailure(f"contract file is missing: {normalized}")
+        try:
+            task = json.loads(contract_file.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise GateFailure(
+                f"invalid task contract {normalized}: {exc}"
+            ) from exc
+
+        expected_branch = Path(normalized).stem.replace("__", "/")
+        if task.get("expected_branch") != expected_branch:
+            raise GateFailure(
+                f"{normalized} must bind expected_branch to {expected_branch}"
+            )
+        if task.get("base_ref") != "origin/main":
+            raise GateFailure(f"{normalized} must use base_ref origin/main")
+        if task.get("expected_head_sha") not in ("", None):
+            raise GateFailure(f"{normalized} must not pre-authorize a head SHA")
+        if task.get("approved_by") != approver:
+            raise GateFailure(f"{normalized} has invalid approved_by metadata")
+        if not str(task.get("approval_reason", "")).strip():
+            raise GateFailure(f"{normalized} has no approval reason")
+        if task.get("forbid_test_removals") is not True:
+            raise GateFailure(f"{normalized} must forbid test removals")
+        protected = set(task.get("protected_paths", []))
+        if not required_protected.issubset(protected):
+            raise GateFailure(
+                f"{normalized} must protect production data and secret paths"
+            )
+        if task.get("waivers") != []:
+            raise GateFailure(f"{normalized} may not pre-authorize waivers")
+        if task.get("allowed_file_patterns"):
+            raise GateFailure(
+                f"{normalized} may not use broad allowed file patterns"
+            )
+
+        allowed = task.get("allowed_files")
+        required = task.get("required_tests")
+        focused = task.get("focused_commands")
+        if not isinstance(allowed, list) or not allowed:
+            raise GateFailure(f"{normalized} must list exact allowed files")
+        if not all(
+            isinstance(item, str) and item.strip() for item in allowed
+        ):
+            raise GateFailure(
+                f"{normalized} has an invalid allowed_files entry"
+            )
+        if not isinstance(required, list) or not required:
+            raise GateFailure(f"{normalized} must list required tests")
+        if not isinstance(focused, list) or not focused:
+            raise GateFailure(f"{normalized} must list focused commands")
+        if any(
+            any(
+                path_matches_rule(item.replace("\\", "/"), rule)
+                for rule in required_protected
+            )
+            for item in allowed
+        ):
+            raise GateFailure(
+                f"{normalized} may not allow protected production files"
+            )
+
+    return f"{len(files)} owner-bound contract file(s) validated"
+
+
 def check_diff(base_ref: str) -> str:
     commands = [
-        ["git", "diff", "--check", f"{base_ref}...HEAD"],
+        ["git", "diff", "--check", base_ref, "HEAD"],
         ["git", "diff", "--check"],
         ["git", "diff", "--cached", "--check"],
     ]
@@ -512,6 +626,10 @@ def main() -> int:
     results = [
         execute_check("branch-and-sha", lambda: check_identity(config, contract)),
         execute_check("changed-file-policy", lambda: check_file_policy(config, files, contract)),
+        execute_check(
+            "contract-administration",
+            lambda: check_contract_administration(files, contract),
+        ),
         execute_check("git-diff-check", lambda: check_diff(base_ref)),
         execute_check("working-tree-initial", lambda: check_initial_tree(config, args.level)),
         execute_check("conflict-markers", lambda: check_conflict_markers(files)),

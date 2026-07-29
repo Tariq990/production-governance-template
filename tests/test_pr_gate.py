@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import subprocess
 import unittest
 from pathlib import Path
 
@@ -75,6 +77,51 @@ def test_changed_files_failure_is_not_hidden(monkeypatch):
         pr_gate.changed_files("missing")
 
 
+def test_tree_comparison_ignores_content_already_in_squashed_base(
+    tmp_path, monkeypatch
+):
+    def run(*args: str) -> None:
+        subprocess.run(
+            ["git", *args],
+            cwd=tmp_path,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+    run("init", "-b", "main")
+    run("config", "user.name", "Gate Test")
+    run("config", "user.email", "gate@example.invalid")
+    (tmp_path / "README.md").write_text("base\n", encoding="utf-8")
+    run("add", "README.md")
+    run("commit", "-m", "base")
+    run("branch", "trusted")
+
+    run("checkout", "trusted")
+    contract = tmp_path / "governance" / "contracts" / "task.json"
+    contract.parent.mkdir(parents=True)
+    contract.write_text('{"trusted": true}\n', encoding="utf-8")
+    run("add", "governance/contracts/task.json")
+    run("commit", "-m", "trusted contract")
+
+    run("checkout", "main")
+    run("checkout", "-b", "feature")
+    (tmp_path / "feature.py").write_text("VALUE = 1\n", encoding="utf-8")
+    run("add", "feature.py")
+    run("commit", "-m", "feature")
+
+    run("checkout", "main")
+    contract.parent.mkdir(parents=True)
+    contract.write_text('{"trusted": true}\n', encoding="utf-8")
+    run("add", "governance/contracts/task.json")
+    run("commit", "-m", "squashed base content")
+    run("checkout", "feature")
+    run("merge", "--no-ff", "main", "-m", "merge squashed main")
+
+    monkeypatch.setattr(pr_gate, "ROOT", tmp_path)
+    assert pr_gate.changed_files("trusted") == ["feature.py"]
+
+
 def test_committed_diff_is_checked(monkeypatch):
     calls = []
 
@@ -84,7 +131,7 @@ def test_committed_diff_is_checked(monkeypatch):
 
     monkeypatch.setattr(pr_gate, "run_process", run)
     pr_gate.check_diff("origin/main")
-    assert ["git", "diff", "--check", "origin/main...HEAD"] in calls
+    assert ["git", "diff", "--check", "origin/main", "HEAD"] in calls
 
 
 def test_out_of_scope_file_blocks():
@@ -101,7 +148,90 @@ def test_protected_path_blocks():
         pr_gate.check_file_policy(
             {"gate": {}},
             ["data/production/a.json"],
-            {"protected_paths": ["data/production/"]},
+            {
+                "allowed_files": ["data/production/a.json"],
+                "protected_paths": ["data/production/"],
+            },
+        )
+
+
+def test_allowed_contract_pattern_accepts_matching_file():
+    detail = pr_gate.check_file_policy(
+        {"gate": {}},
+        ["governance/contracts/fix__safe.json"],
+        {"allowed_file_patterns": ["governance/contracts/*.json"]},
+    )
+    assert detail == "1 changed file(s) accepted"
+
+
+def test_contract_without_scope_blocks():
+    with pytest.raises(pr_gate.GateFailure, match="no allowed file scope"):
+        pr_gate.check_file_policy({"gate": {}}, ["src/a.py"], {})
+
+
+CONTRACT_PATH = "governance/contracts/fix__frontend-security.json"
+
+
+def task_contract(**overrides):
+    task = {
+        "expected_branch": "fix/frontend-security",
+        "expected_head_sha": "",
+        "base_ref": "origin/main",
+        "allowed_files": ["frontend/package.json", "frontend/package-lock.json"],
+        "required_tests": ["tests/test_frontend.py::test_build"],
+        "focused_commands": [["python", "-m", "pytest", "-q", "tests"]],
+        "forbid_test_removals": True,
+        "protected_paths": [
+            "data/production/",
+            "secrets/",
+            "private_keys/",
+        ],
+        "waivers": [],
+        "approved_by": "Tariq990",
+        "approval_reason": "Remove a validated dependency advisory.",
+    }
+    task.update(overrides)
+    return task
+
+
+def write_task_contract(tmp_path, task):
+    path = tmp_path / CONTRACT_PATH
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps(task), encoding="utf-8")
+
+
+def admin_contract():
+    return {
+        "contract_administration": True,
+        "contract_approver": "Tariq990",
+    }
+
+
+def test_valid_contract_administration(tmp_path):
+    write_task_contract(tmp_path, task_contract())
+    detail = pr_gate.check_contract_administration(
+        [CONTRACT_PATH], admin_contract(), root=tmp_path
+    )
+    assert detail == "1 owner-bound contract file(s) validated"
+
+
+def test_contract_branch_filename_mismatch_blocks(tmp_path):
+    write_task_contract(
+        tmp_path, task_contract(expected_branch="fix/different")
+    )
+    with pytest.raises(pr_gate.GateFailure, match="bind expected_branch"):
+        pr_gate.check_contract_administration(
+            [CONTRACT_PATH], admin_contract(), root=tmp_path
+        )
+
+
+def test_broad_task_contract_scope_blocks(tmp_path):
+    write_task_contract(
+        tmp_path, task_contract(allowed_file_patterns=["frontend/*"])
+    )
+    with pytest.raises(pr_gate.GateFailure, match="broad allowed file patterns"):
+        pr_gate.check_contract_administration(
+            [CONTRACT_PATH], admin_contract(), root=tmp_path
         )
 
 

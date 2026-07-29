@@ -17,11 +17,11 @@ jobs:
       GATE_SOURCE_BRANCH: ${{ github.head_ref || github.ref_name }}
       GATE_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           fetch-depth: 0
 
-      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.12"
 
@@ -32,9 +32,20 @@ jobs:
         if: github.event_name == 'pull_request'
         shell: bash
         run: |
-          safe_branch="${GITHUB_HEAD_REF//\//_}"
-          contract="governance/contracts/${safe_branch}.json"
-          git show "origin/${GITHUB_BASE_REF}:${contract}" > .gate/ci-contract.json
+          encoded_branch="${GITHUB_HEAD_REF//\//__}"
+          contract="governance/contracts/${encoded_branch}.json"
+          legacy_branch="${GITHUB_HEAD_REF//\//_}"
+          legacy_contract="governance/contracts/${legacy_branch}.json"
+          if git cat-file -e "origin/${GITHUB_BASE_REF}:${contract}" 2>/dev/null; then
+            git show "origin/${GITHUB_BASE_REF}:${contract}" > .gate/ci-contract.json
+          elif git cat-file -e "origin/${GITHUB_BASE_REF}:${legacy_contract}" 2>/dev/null; then
+            git show "origin/${GITHUB_BASE_REF}:${legacy_contract}" > .gate/ci-contract.json
+          elif [[ "${GITHUB_HEAD_REF}" == "governance/contract-administration" ]]; then
+            git show "origin/${GITHUB_BASE_REF}:.gate/task-contract.example.json" > .gate/ci-contract.json
+          else
+            echo "BLOCKED: owner-approved contract not found at ${contract}" >&2
+            exit 1
+          fi
           test -s .gate/ci-contract.json
 
       - name: Run authoritative quality gate
